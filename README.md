@@ -6,7 +6,7 @@ It combines advanced entity resolution, bibliometric data engineering, and topic
 
 ---
 
-## Entity Resolution & Matching Pipeline
+### Entity Resolution & Matching Pipeline
 
 A scalable matching system resolves identities across datasets:
 
@@ -16,7 +16,7 @@ A scalable matching system resolves identities across datasets:
 
 ---
 
-## OpenAlex Data Extraction
+### OpenAlex Data Extraction
 
 A parallelised data retrieval system linking publication metadata using DOIs or OpenAlex IDs, with:
 
@@ -26,6 +26,6 @@ A parallelised data retrieval system linking publication metadata using DOIs or 
 
 ---
 
-## System Design
+### System Design
 
 The pipeline is optimised for large datasets using PostgreSQL, temporary tables, and parallel processing, producing clean and usable outputs for research evaluation and bibliometric analysis.  
