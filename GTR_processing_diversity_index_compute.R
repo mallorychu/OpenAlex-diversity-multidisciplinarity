@@ -1240,7 +1240,7 @@ people_counts <- all_matches %>%
 # -> proportion of people aged < 3,5,7,10
 academic_age_prop <- all_matches %>%
   left_join(
-    OA_origin_gender_data_1 %>%
+    OA_origin_gender_data %>%
       select(grant, author_id, academic_age_filtered_no_gap_2) %>%
       distinct(),
     by = c("author_id" = "author_id", "grant" = "grant")
