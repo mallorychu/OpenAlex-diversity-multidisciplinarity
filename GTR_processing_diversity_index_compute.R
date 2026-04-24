@@ -1933,4 +1933,6 @@ pi_summary <- pi_summary %>%
   ) %>%
   relocate(grant, .before = 1)
 
+pi_summary <- pi_summary %>% filter(grant %in% full_data$grant)
+
 write.csv(pi_summary, "PI_characteristics.csv", row.names = FALSE)
