@@ -1287,7 +1287,8 @@ cum_pub_count <- pubs %>%
   summarise(
     n_cum_pub = n_distinct(Title),
     .groups = "drop"
-  )
+  ) %>%
+  mutate(n_cum_pub = replace_na(n_cum_pub, 0))
 
 # -> Team UK geographic dispersion (number of distinct UK regions (NUTS2&1))
 uni_group_regions <- read_csv('./University_group_regions.csv')
