@@ -1281,7 +1281,7 @@ org_type_counts <- all_matches %>%
   )
 
 # -> cumulative publication count (all prior years)
-cum_pub_count <- pubs_sub %>%
+cum_pub_count <- pubs %>%
   filter(Year < 2021) %>%
   group_by(ProjectReference) %>%
   summarise(
