@@ -1689,6 +1689,10 @@ n_countries_df <- n_team_countries %>%
   mutate(
     n_collaborators = replace_na(n_collaborators, 0),
     n_collaborators_countries = replace_na(n_collaborators_countries, 0)
+  ) %>%
+  mutate(
+    unique_countries_team = map_chr(unique_countries_team, ~ paste(.x, collapse = ",")),
+    unique_countries_collab = map_chr(unique_countries_collab, ~ paste(.x, collapse = ","))
   )
 
 write_csv(n_countries_df, './grant_country_summary.csv')
@@ -1703,7 +1707,7 @@ full_data <- diversity %>%
   left_join(org_type_counts, by = "grant") %>%
   left_join(cum_pub_count, by = c("grant"="ProjectReference")) %>%
   left_join(team_uk_region, by = "grant") %>%
-  left_join(grant_country_summary, by = "grant") %>%
+  left_join(grant_country_summary %>% select(-starts_with('unique_countries')), by = "grant")  %>%
   left_join(n_pubs, by = c("grant"="ProjectReference")) %>%
   left_join(grant_specific_vars, by = c("grant"="reference")) %>%
   left_join(partner_summary, by = c("grant"="reference")) %>%
