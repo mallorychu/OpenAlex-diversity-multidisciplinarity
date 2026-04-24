@@ -1351,7 +1351,7 @@ cols <- c(
 # Count unique values per reference
 unique_counts <- participants %>%
   group_by(reference) %>%
-  summarise(across(all_of(cols_to_check), ~ n_distinct(.x, na.rm = TRUE)), .groups = "drop")
+  summarise(across(all_of(cols), ~ n_distinct(.x, na.rm = TRUE)), .groups = "drop")
 
 # Check which columns have more than one unique value
 unique_counts %>%
