@@ -1925,6 +1925,12 @@ pi_summary <- pi_summary %>%
     pi_cumulative_publication_count = total_works_pre_cutoff,
     pi_academic_age_2021 = academic_age_ref_year_filtered_no_gap,
     PI_n_prior_grants = grants_before_earliest
-  )
+  ) %>%
+  distinct() %>%
+  left_join(
+    all_matches %>% select(author_id, grant) %>% distinct(),
+    by = c("oa_id" = "author_id")
+  ) %>%
+  relocate(grant, .before = 1)
 
 write.csv(pi_summary, "PI_characteristics.csv", row.names = FALSE)
