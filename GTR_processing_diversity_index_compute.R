@@ -7,7 +7,8 @@
 # List of packages
 packages <- c(
   "dplyr", "purrr", "stringr", "dbplyr", "DBI", "furrr",
-  "stringdist", "arrow", "readr", "RPostgres", "tidyr", "DescTools"
+  "stringdist", "arrow", "readr", "RPostgres", "tidyr", "DescTools", 
+  "data.table", "lubridate", "vegan"
 )
 
 # Install missing packages
@@ -44,7 +45,7 @@ participants <- read_excel('./gtr+_projects_participants_2025_12.xlsx', sheet = 
 # connect projects with publications
 final_RC_publications_short <- publication %>%
   full_join(
-    participants_with_RC %>%
+    participants %>%
       mutate(base_ref_part = sub("/\\d+$", "", reference)),
     by = c("ProjectReference" = "reference")
   ) %>%
