@@ -1725,7 +1725,7 @@ write.csv(full_data, "diversity_outcomes_and_characteristics.csv", row.names = F
 # ---- Load Input ----
 OA_origin_gender_data=read_parquet('./OA_origin_gender_data.parquet')
 
-all_matches <- read_parquet(INPUT_FILE)
+all_matches <- read_parquet("./author_institution_matches_all_years_2021_2024.parquet")
 
 people <- read_csv('./gtr+_projects_people.csv')
 
@@ -1738,6 +1738,7 @@ on.exit({
   message("[CLEANUP] Done.")
 }, add = TRUE)
 
+# 8.3% no OA author id
 
 titles <- c("Dr\\.?", "Professor", "Sir", "Madam", "Dr\\. Md\\.", "Mr\\.?", "Mrs\\.?", "Ms\\.?", "Miss") # all Titles
 titles_regex <- paste0("^(", paste(titles, collapse = "|"), ")\\b") # for matching Titles
@@ -1799,7 +1800,7 @@ people_updated_oa_id <- people %>%
     by = c("reference", "first_name", "surname")
   ) %>%
   mutate(oa_id = if_else(is.na(oa_id), author_id, oa_id)) %>%
-  select(-author_id)
+  select(-author_id) %>% distinct()
 
 unique_author_ids  <- people_updated_oa_id %>%
   filter(!is.na(oa_id)) %>%
@@ -1828,7 +1829,7 @@ works_count_pre_cutoff <- dbGetQuery(
 
 # -> PI number of prior UKRI grants (all prior years)
 # 1️. Earliest start from selected grants
-earliest_grant_pre_cutoff <- people_updated_oa_id %>%
+earliest_grant_pre_cutoff <- people_updated_oa_id %>%  #only contains PIs already
   filter(!is.na(oa_id), reference %in% full_data$grant) %>%
   left_join(
     participants %>% select(reference, start) %>% distinct(),
@@ -1841,7 +1842,7 @@ earliest_grant_pre_cutoff <- people_updated_oa_id %>%
   )
 
 # 2. Count all previous grants
-grants_before <- people_updated_oa_id %>%
+grants_before <- people_updated_oa_id %>%  #only contains PIs already
   filter(!is.na(oa_id)) %>%
   left_join(
     participants %>% select(reference, start) %>% distinct(),
@@ -1852,92 +1853,87 @@ grants_before <- people_updated_oa_id %>%
   group_by(oa_id) %>%
   summarise(
     grants_before_earliest = sum(start < earliest_start_pre_cutoff, na.rm = TRUE),
-    is_first_PI_grant = if (all(is.na(grants_before_earliest))) {
-      NA_integer_
-    } else {
-      as.integer(any(!is.na(grants_before_earliest)) && min(grants_before_earliest, na.rm = TRUE) == 0)
-    },
     .groups = "drop"
   )
 
+# -> is first grant as PI or coI
+first_pi_grant <- people %>%
+  filter(role == "PI_PER", !is.na(oa_id)) %>%
+  mutate(oa_id = paste0("https://openalex.org/", oa_id)) %>%
+  left_join(
+    participants %>% select(reference, start) %>% distinct(),
+    by = "reference"
+  ) %>%
+  distinct(oa_id, reference, start) %>%
+  group_by(oa_id) %>%
+  mutate(
+    is_first_pi_grant = if (all(is.na(start))) {
+      NA
+    } else {
+      start == min(start, na.rm = TRUE)
+    }
+  ) %>%
+  ungroup() %>%
+  select(-start) %>%
+  filter(reference %in% full_data$grant)
+
 
 # -> PI Academic Age
-pi_academic_age <- people_updated_oa_id %>%
+pi_academic_age <- people_updated_oa_id %>%  #only contains PIs already
   left_join(
     OA_origin_gender_data %>%
       select(author_id, academic_age_ref_year_filtered_no_gap) %>% distinct(),
     by = c("oa_id" = "author_id")
   ) %>%
-  select(oa_id, academic_age_ref_year_filtered_no_gap)
+  select(oa_id, academic_age_ref_year_filtered_no_gap) %>%
+  filter(!is.na(oa_id)) %>% distinct()
+
 
 # -> is first grant as PI or coI
-earliest_grant_coi <- people %>%
-  filter(role %in% c("COI_PER", "RESEARCH_COI_PER"), !is.na(oa_id), reference %in% full_data$grant) %>%
-  mutate(oa_id = paste0("https://openalex.org/", oa_id)) %>%   # prepend OpenAlex URL
+# ---------------------------------------------------------
+# for people with more than one roles in each reference/grant
+# keep the highest role: Assume: PI -> COI -> RESEARCH_COI
+role_priority <- c("PI_PER" = 1, "COI_PER" = 2, "RESEARCH_COI_PER" = 3)
+
+first_pi_coi_grant <- people %>%
+  filter(!is.na(oa_id)) %>%
+  mutate(oa_id = paste0("https://openalex.org/", oa_id),
+         is_coi = role %in% c("COI_PER", "RESEARCH_COI_PER"),
+         is_pi  = role == "PI_PER",
+         role_rank = role_priority[role]   # assign priority to roles (lower = higher priority)
+  ) %>%
+  group_by(oa_id, reference) %>%
+  # keep highest-priority role per person–grant
+  slice_min(order_by = role_rank, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(!is.na(role_rank)) %>%
+  select(-role_rank) %>%
   left_join(
     participants %>% select(reference, start) %>% distinct(),
     by = "reference"
   ) %>%
   group_by(oa_id) %>%
-  summarise(
-    earliest_start_coi = if (all(is.na(start))) NA else min(start, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-grants_before_coi <- people %>%
-  filter(role %in% c("COI_PER", "RESEARCH_COI_PER"), !is.na(oa_id)) %>%
-  mutate(oa_id = paste0("https://openalex.org/", oa_id)) %>%   # prepend OpenAlex URL
-  left_join(
-    participants %>% select(reference, start) %>% distinct(),
-    by = "reference"
-  ) %>%
-  distinct(oa_id, reference, start) %>%   # ensure unique grants
-  left_join(earliest_grant_coi, by = "oa_id") %>%
-  group_by(oa_id) %>%
-  summarise(
-    grants_before_earliest = sum(start < earliest_start_coi, na.rm = TRUE),
-    is_first_grant_as_coi = if (all(is.na(grants_before_earliest))) {
-      NA_integer_
-    } else {
-      as.integer(any(!is.na(grants_before_earliest)) && min(grants_before_earliest, na.rm = TRUE) == 0)
-    },
-    .groups = "drop"
-  )
-
-# Combine PI and Co-I first grant
-first_grants_combined <- grants_before %>%   # from PI pipeline
-  select(oa_id, is_first_PI_grant) %>%
-  full_join(
-    grants_before_coi %>% select(oa_id, is_first_grant_as_coi),   # from Co-I pipeline
-    by = "oa_id"
-  ) %>%
   mutate(
-    is_first_grant_of_PI_or_COI = case_when(
-      !is.na(is_first_PI_grant) & is_first_PI_grant == 1 ~ 1L,
-      !is.na(is_first_grant_as_coi) & is_first_grant_as_coi == 1 ~ 1L,
-      TRUE ~ 0L
-    )
+    is_first_pi_coi_grant = if (all(is.na(start))) {
+      NA
+    } else {
+      start == min(start, na.rm = TRUE)
+    }
   ) %>%
-  select(-is_first_grant_as_coi)
+  ungroup() %>%
+  select(reference, oa_id, is_first_pi_coi_grant) %>%
+  filter(reference %in% full_data$grant)
 
-pi_summary <- pi_academic_age %>%
-  full_join(works_count_pre_cutoff, by = "oa_id") %>%
-  full_join(first_grants_combined, by = "oa_id") %>%
-  full_join(grants_before %>% select(oa_id, grants_before_earliest), by = "oa_id")
 
-pi_summary <- pi_summary %>%
-  rename(
-    pi_cumulative_publication_count = total_works_pre_cutoff,
-    pi_academic_age_2021 = academic_age_ref_year_filtered_no_gap,
-    PI_n_prior_grants = grants_before_earliest
-  ) %>%
-  distinct() %>%
-  left_join(
-    all_matches %>% select(author_id, grant) %>% distinct(),
-    by = c("oa_id" = "author_id")
-  ) %>%
-  relocate(grant, .before = 1)
+# combine all PI variables
+pi_summary <- first_pi_grant %>%
+  left_join(first_pi_coi_grant, by = c("reference", "oa_id")) %>%
+  left_join(works_count_pre_cutoff, by = "oa_id") %>%
+  left_join(grants_before, by = "oa_id") %>% #already filtered grant
+  left_join(pi_academic_age, by = "oa_id") %>%
+  rename(grant = reference)
 
 pi_summary <- pi_summary %>% filter(grant %in% full_data$grant)
 
 write.csv(pi_summary, "PI_characteristics.csv", row.names = FALSE)
+
