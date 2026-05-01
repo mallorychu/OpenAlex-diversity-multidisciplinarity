@@ -28,7 +28,7 @@ N_WORKERS <- 4
 BATCH_SIZE <- 50000  # For very large publication datasets
 
 # === INPUT YEAR RANGE =====
-year_range <- c(2021, 2024)
+year_range <- 2021:2024
 # ==========================
 
 # ---- 1. Load GTR+ Data ----
@@ -1168,6 +1168,9 @@ save(origin_diversity, age_diversity,
 OA_diversity_resuts_combined <- origin_diversity %>% full_join(gender_diversity, by=grouping_variables) %>%
   full_join(age_diversity, by=grouping_variables)
 
+OA_diversity_resuts_combined <- OA_diversity_resuts_combined %>%
+  mutate(Gini = ifelse(is.na(Gini), 0, Gini)) 
+
 write.csv(OA_diversity_resuts_combined, "OA_diversity_combined.csv", row.names = FALSE)
 
 
@@ -1209,10 +1212,10 @@ OA_origin_gender_data <- read_parquet('./OA_origin_gender_data.parquet')
 # -> count of unnamed people, count of named people, total no of people, 
 # -> proportion of named/total people
 people_counts <- all_matches %>%
-  distinct(grant, author_name) %>%
+  distinct(grant, author_id) %>%
   group_by(grant) %>%
   summarise(
-    n_total_authors = n_distinct(author_name),
+    n_total_authors = n_distinct(author_id),
     .groups = "drop"
   ) %>%
   
@@ -1481,7 +1484,7 @@ grant_multidisciplinary_index_scenario_summary <- all_matches %>%
     prop_95 = mean(value > 0.95, na.rm = TRUE),
     prop_99 = mean(value > 0.99, na.rm = TRUE),
     
-    n_pubs = n_distinct(work_id),
+    n_pubs = n_distinct((work_id[!is.na(value)])),
     
     shannon = diversity(value, index = "shannon"),
     simpson = diversity(value, index = "simpson"),
@@ -1931,7 +1934,11 @@ pi_summary <- first_pi_grant %>%
   left_join(works_count_pre_cutoff, by = "oa_id") %>%
   left_join(grants_before, by = "oa_id") %>% #already filtered grant
   left_join(pi_academic_age, by = "oa_id") %>%
-  rename(grant = reference)
+  rename(grant = reference,
+         pi_cumulative_publication_count = total_works_pre_cutoff,
+         pi_n_prior_grants = grants_before_earliest,
+         pi_academic_age_2021 = academic_age_ref_year_filtered_no_gap
+  )
 
 pi_summary <- pi_summary %>% filter(grant %in% full_data$grant)
 
