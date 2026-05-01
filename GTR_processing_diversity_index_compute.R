@@ -1168,6 +1168,9 @@ save(origin_diversity, age_diversity,
 OA_diversity_resuts_combined <- origin_diversity %>% full_join(gender_diversity, by=grouping_variables) %>%
   full_join(age_diversity, by=grouping_variables)
 
+OA_diversity_resuts_combined <- OA_diversity_resuts_combined %>%
+  mutate(Gini = ifelse(is.na(Gini), 0, Gini)) 
+
 write.csv(OA_diversity_resuts_combined, "OA_diversity_combined.csv", row.names = FALSE)
 
 
