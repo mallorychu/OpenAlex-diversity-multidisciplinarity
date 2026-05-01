@@ -652,10 +652,10 @@ if __name__ == "__main__":
     # -----------------------------------------------------
     
     # run ---------------------------------------------------------
-    # pub2ref, topics = load_inputs()
+    pub2ref, topics = load_inputs()
 
-    pub2ref = pd.read_parquet("pub2ref_processed.parquet", engine='pyarrow').drop_duplicates()
-    topics  = pd.read_parquet("topics_processed.parquet", engine='pyarrow').drop_duplicates()
+    pub2ref = pub2ref.drop_duplicates()
+    topics  = topics.drop_duplicates()
     
     # Pre-compute distance matrices for selected scenarios only
     dist_matrices = precompute_distance_matrices(pub2ref, topics, scenarios)
