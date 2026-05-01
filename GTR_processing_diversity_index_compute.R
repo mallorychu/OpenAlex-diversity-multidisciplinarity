@@ -1828,9 +1828,9 @@ works_count_pre_cutoff <- dbGetQuery(
 )
 
 # -> PI number of prior UKRI grants (all prior years)
-# 1️. Earliest start from selected grants
+# 1️. Earliest start from selected grants within the census period
 earliest_grant_pre_cutoff <- people_updated_oa_id %>%  #only contains PIs already
-  filter(!is.na(oa_id), reference %in% full_data$grant) %>%
+  filter(!is.na(oa_id), reference %in% full_data$grant) %>%  # only grants in the census period
   left_join(
     participants %>% select(reference, start) %>% distinct(),
     by = "reference"
@@ -1843,7 +1843,7 @@ earliest_grant_pre_cutoff <- people_updated_oa_id %>%  #only contains PIs alread
 
 # 2. Count all previous grants
 grants_before <- people_updated_oa_id %>%  #only contains PIs already
-  filter(!is.na(oa_id)) %>%
+  filter(!is.na(oa_id)) %>%  # need all grants
   left_join(
     participants %>% select(reference, start) %>% distinct(),
     by = "reference"
