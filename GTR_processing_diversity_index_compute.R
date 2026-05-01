@@ -1171,7 +1171,7 @@ OA_diversity_resuts_combined <- origin_diversity %>% full_join(gender_diversity,
 OA_diversity_resuts_combined <- OA_diversity_resuts_combined %>%
   mutate(
     Gini = ifelse(
-      (Richness == 1 | (Richness == 0 & n_people == 1)) & is.na(Gini),
+      (Richness == 1 | (Richness == 0 & N_people == 1)) & is.na(Gini),
       0,
       Gini
     )
