@@ -827,8 +827,8 @@ print("Step 7c.5: Done.")
 ## 8) Namsor
 # ----------------------------
 
-# --> read origin from Namsor
-# --> read gender from Namsor
+# --> read origin prediction from Namsor
+# --> read gender prediction from Namsor
 
 origin_unique <- origin %>%
   group_by(fullName) %>%
