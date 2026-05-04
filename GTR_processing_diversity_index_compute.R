@@ -1190,8 +1190,7 @@ all_matches <- all_matches %>% filter(match_type != "string_distance") # manuall
 
 pubs <- read_rds('./project_publications_short.rds')
 pubs_sub <- pubs %>% 
-  filter(between(as.numeric(Year), year_range[1], year_range[2])) %>% 
-  filter(ProjectReference %in% all_matches$grant)
+  filter(between(as.numeric(Year), year_range[1], year_range[2]))
 
 
 load('./participants.Rdata')
