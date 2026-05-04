@@ -1203,6 +1203,8 @@ participants <- participants %>% mutate(
   )) %>% 
   filter(reference %in% all_matches$grant)
 
+people <- read_csv('./gtr+_projects_people.csv')
+
 diversity <- read_csv("./OA_diversity_combined.csv")
 
 OA_origin_gender_data <- read_parquet('./OA_origin_gender_data.parquet')
@@ -1213,39 +1215,71 @@ OA_origin_gender_data <- read_parquet('./OA_origin_gender_data.parquet')
 
 ## ===== Team =======
 
-# -> count of collaborators
-
 # -> count of unnamed people, count of named people, total no of people, 
 # -> proportion of named/total people
-people_counts <- all_matches %>%
+# 1. Total matched authors in publications per grant
+total_authors <- all_matches %>%
   distinct(grant, author_id) %>%
   group_by(grant) %>%
   summarise(
     n_total_authors = n_distinct(author_id),
     .groups = "drop"
+  )
+
+# 2. Named matched authors in the grant and publications
+matched_named_authors <- all_matches %>%
+  select(grant, author_id, author_name) %>%
+  
+  # OA_id match first
+  left_join(
+    people %>%
+      filter(reference %in% all_matches$grant) %>%
+      clean_names(titles_regex) %>%
+      mutate(
+        oa_id = paste0("https://openalex.org/", oa_id),
+        full_name = paste(cleaned_first_name, cleaned_surname)
+      ) %>% 
+      distinct(reference, oa_id, .keep_all = TRUE) %>%
+      select(reference, oa_id, full_name),
+    by = c("grant" = "reference", "author_id" = "oa_id")
+  ) %>%
+  mutate(oa_match = !is.na(full_name)) %>%
+  
+  # name matching if no OA_id
+  mutate(
+    name_match = !oa_match & author_name == full_name
   ) %>%
   
+  filter(oa_match | name_match) %>%
+  distinct(grant, author_id, .keep_all = TRUE)
+
+# 3. un-named people and summary named/un-named counts
+# set unmatched grants (21.9%) with no named author matched to the number of people listed in GTR+ people 
+# limiting at the number of total matched authors from publications
+people_counts <- total_authors %>%
   left_join(
-    pubs_sub %>%
-      group_by(ProjectReference) %>%
-      summarise(
-        n_named_authors = n_distinct(Author),
-        .groups = "drop"
-      ) %>%
-      rename(grant = ProjectReference),
+    matched_named_authors %>%
+      group_by(grant) %>%
+      summarise(n_named_authors = n_distinct(author_id), .groups = "drop"),
     by = "grant"
   ) %>%
-  
+  left_join(
+    people %>%
+      filter(reference %in% all_matches$grant) %>%
+      group_by(reference) %>%
+      summarise(n_gtr = n_distinct(first_name, surname), .groups = "drop"),
+    by = c("grant" = "reference")
+  ) %>%
   mutate(
-    n_named_authors = coalesce(n_named_authors, 0),
+    n_named_authors = coalesce(n_named_authors, pmin(n_gtr, n_total_authors, na.rm = TRUE), 0),
     n_unnamed_authors = pmax(n_total_authors - n_named_authors, 0),
-    
     prop_named_authors = ifelse(
       n_total_authors > 0,
-      pmin(n_named_authors / n_total_authors, 1),
+      n_named_authors / n_total_authors,
       NA_real_
     )
   )
+
 
 # -> proportion of people aged < 3,5,7,10
 academic_age_prop <- all_matches %>%
@@ -1710,6 +1744,10 @@ write_csv(n_countries_df, './grant_country_summary.csv')
 # --------------------------
 # -----  Combine ----------
 # --------------------------
+# -----  Combine ----------
+# --------------------------
+grant_country_summary <- read_csv('grant_country_summary.csv')
+
 full_data <- diversity %>% 
   left_join(people_counts, by = "grant") %>%
   left_join(academic_age_prop, by = "grant") %>%
@@ -1717,7 +1755,7 @@ full_data <- diversity %>%
   left_join(org_type_counts, by = "grant") %>%
   left_join(cum_pub_count, by = c("grant"="ProjectReference")) %>%
   left_join(team_uk_region, by = "grant") %>%
-  left_join(grant_country_summary %>% select(-starts_with('unique_countries')), by = "grant")  %>%
+  left_join(grant_country_summary %>% select(-starts_with('unique_countries')), by = "grant") %>%
   left_join(n_pubs, by = c("grant"="ProjectReference")) %>%
   left_join(grant_specific_vars, by = c("grant"="reference")) %>%
   left_join(partner_summary, by = c("grant"="reference")) %>%
@@ -1727,14 +1765,63 @@ full_data <- full_data %>% filter(between(start_cy, 2021, 2024)) # include proje
 
 write.csv(full_data, "diversity_outcomes_and_characteristics.csv", row.names = FALSE)
 
+# -> collaborator info
+grant_country_summary <- read_csv('grant_country_summary.csv')
+
 
 #''''''''''''''''''''''''''''''''''''''
 # Get PI information
 #''''''''''''''''''''''''''''''''''''''
+# ---- Functions ----
+clean_names <- function(df, titles_regex) {
+  
+  df %>%
+    mutate(
+      
+      # remove titles + basic punctuation cleaning
+      across(
+        c(first_name, surname),
+        ~ .x %>%
+          str_replace_all("[\\\\/,]", " ") %>%          # replace / or \ with space
+          str_remove(titles_regex),                    # remove Title at start of the first name
+        .names = "cleaned_{.col}"
+      ),
+      
+      # Extract all (middle_name) anywhere in first_name or surname
+      first_middle   = str_extract(cleaned_first_name, "\\(([^)]+)\\)") %>% str_remove_all("[()]"),
+      surname_middle = str_extract(cleaned_surname, "\\(([^)]+)\\)") %>% str_remove_all("[()]"),
+      
+      # Remove (middle_name) from both columns
+      cleaned_first_name = str_trim(str_remove_all(cleaned_first_name, "\\([^)]*\\)")),
+      cleaned_surname   = str_trim(str_remove_all(cleaned_surname, "\\([^)]*\\)")),
+      
+      # Check if each cleaned column has ≥2 consecutive letters
+      surname_has2 = map_lgl(cleaned_surname, ~ !is.na(.x) & str_detect(.x, "\\p{L}{2}")),
+      other_has2   = map_lgl(cleaned_first_name, ~ !is.na(.x) & str_detect(.x, "\\p{L}{2}")),
+      
+      # Remove all leading/trailing non-letter characters and capitalize first letter of each word/hyphen
+      across(
+        c(cleaned_first_name, cleaned_surname),
+        ~ .x %>%
+          str_replace_all("^\\P{L}+|\\P{L}+$", "") %>%                       # trim non-letters at ends
+          str_replace_all("(^|\\-|\\s)(\\p{L})", ~ toupper(.x)) %>%         # uppercase after space or hyphen
+          str_replace_all("(?<=\\p{L})(\\p{L})", ~ tolower(.x)) %>%         # lowercase remaining letters
+          str_squish()                                                       # collapse multiple spaces to one
+      )
+    ) %>%
+    
+    # drop intermediate helper columns
+    select(-first_middle, -surname_middle, -surname_has2, -other_has2)
+}
+
+# ---- Config ----
+INPUT_FILE  <- "author_institution_matches_all_years_2021_2024.parquet"
+year_range = 2021:2024
+
 # ---- Load Input ----
 OA_origin_gender_data=read_parquet('./OA_origin_gender_data.parquet')
 
-all_matches <- read_parquet("./author_institution_matches_all_years_2021_2024.parquet")
+all_matches <- read_parquet(INPUT_FILE)
 
 people <- read_csv('./gtr+_projects_people.csv')
 
@@ -1747,45 +1834,16 @@ on.exit({
   message("[CLEANUP] Done.")
 }, add = TRUE)
 
-# 8.3% no OA author id
+#17758 has OA
+#1604 (8.3%) no OA author id
 
 titles <- c("Dr\\.?", "Professor", "Sir", "Madam", "Dr\\. Md\\.", "Mr\\.?", "Mrs\\.?", "Ms\\.?", "Miss") # all Titles
 titles_regex <- paste0("^(", paste(titles, collapse = "|"), ")\\b") # for matching Titles
 
 people_cleaned_na_oa_id <- people %>%
-  filter(role == "PI_PER", is.na(oa_id), reference %in% all_matches$grant) %>%           # only PIs with missing OAID
+  filter(role == "PI_PER", is.na(oa_id), reference %in% all_matches$grant) %>%
   distinct(first_name, surname, .keep_all = TRUE) %>%
-  mutate(
-    across(
-      c(first_name, surname),
-      ~ .x %>%
-        str_replace_all("[\\\\/,]", " ") %>%          # replace / or \ with space
-        str_remove(titles_regex),                  # remove Title at start of the first name
-      .names = "cleaned_{.col}"
-    ),
-    
-    # Extract all (middle_name) anywhere in first_name or surname
-    first_middle   = str_extract(cleaned_first_name, "\\(([^)]+)\\)") %>% str_remove_all("[()]"),
-    surname_middle = str_extract(cleaned_surname, "\\(([^)]+)\\)") %>% str_remove_all("[()]"),
-    
-    # Remove (middle_name) from both columns
-    cleaned_first_name = str_trim(str_remove_all(cleaned_first_name, "\\([^)]*\\)")),
-    cleaned_surname   = str_trim(str_remove_all(cleaned_surname, "\\([^)]*\\)")),
-    
-    # Check if each cleaned column has ≥2 consecutive letters
-    surname_has2 = map_lgl(cleaned_surname, ~ !is.na(.x) & str_detect(.x, "\\p{L}{2}")),
-    other_has2   = map_lgl(cleaned_first_name, ~ !is.na(.x) & str_detect(.x, "\\p{L}{2}")), 
-    
-    # Remove all leading/trailing non-letter characters and capitalize first letter of each word/hyphen
-    across(
-      c(cleaned_first_name, cleaned_surname),
-      ~ .x %>%
-        str_replace_all("^\\P{L}+|\\P{L}+$", "") %>%                       # trim non-letters at ends
-        str_replace_all("(^|\\-|\\s)(\\p{L})", function(m) toupper(m)) %>% # uppercase after space or hyphen
-        str_replace_all("(?<=\\p{L})(\\p{L})", function(m) tolower(m)) %>% # lowercase remaining letters
-        str_squish()                                                       # collapse multiple spaces to one
-    )) %>%
-  select(-first_middle, -surname_middle, -surname_has2, -other_has2)
+  clean_names(titles_regex)
 
 # Get PIs OpenAlex IDs for the ones without OpenAlex IDs
 matched_na_oa_id_pis <- people_cleaned_na_oa_id %>% 
@@ -1837,7 +1895,7 @@ works_count_pre_cutoff <- dbGetQuery(
 )
 
 # -> PI number of prior UKRI grants (all prior years)
-# 1️. Earliest start from selected grants within the census period
+# 1️. Earliest start from selected grants within census period
 earliest_grant_pre_cutoff <- people_updated_oa_id %>%  #only contains PIs already
   filter(!is.na(oa_id), reference %in% full_data$grant) %>%  # only grants in the census period
   left_join(
@@ -1852,7 +1910,7 @@ earliest_grant_pre_cutoff <- people_updated_oa_id %>%  #only contains PIs alread
 
 # 2. Count all previous grants
 grants_before <- people_updated_oa_id %>%  #only contains PIs already
-  filter(!is.na(oa_id)) %>%  # need all grants
+  filter(!is.na(oa_id)) %>% # need all grants
   left_join(
     participants %>% select(reference, start) %>% distinct(),
     by = "reference"
@@ -1944,9 +2002,8 @@ pi_summary <- first_pi_grant %>%
          pi_cumulative_publication_count = total_works_pre_cutoff,
          pi_n_prior_grants = grants_before_earliest,
          pi_academic_age_2021 = academic_age_ref_year_filtered_no_gap
-  )
+  ) 
 
 pi_summary <- pi_summary %>% filter(grant %in% full_data$grant)
 
 write.csv(pi_summary, "PI_characteristics.csv", row.names = FALSE)
-
