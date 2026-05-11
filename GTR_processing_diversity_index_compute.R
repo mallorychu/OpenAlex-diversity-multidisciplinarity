@@ -806,16 +806,14 @@ first_pub_last_segment_tbl <- tbl(con, "works_authorships") %>%
   filter(!is.na(publication_year)) %>%
   select(author_id, publication_year) %>%
   distinct() %>%
-  group_by(author_id) %>%
-  arrange(publication_year, .by_group = TRUE) %>%
   mutate(
-    prev_year = lag(publication_year, order_by = publication_year)
+    prev_year = sql("LAG(publication_year) OVER (PARTITION BY author_id ORDER BY publication_year)")
   ) %>%
   mutate(year_gap = publication_year - prev_year) %>%
   mutate(is_new_segment_start = is.na(year_gap) | year_gap >= 10) %>%
   filter(is_new_segment_start == TRUE) %>%
+  group_by(author_id) %>%
   summarise(
-    # This is the POTENTIAL start year based on the 10-year rule
     potential_filtered_start_year = max(publication_year, na.rm = TRUE),
     .groups = 'drop'
   ) %>%
