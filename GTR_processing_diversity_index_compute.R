@@ -1650,91 +1650,74 @@ grant_multidisciplinary_index_summary_wide <- grant_multidisciplinary_index_scen
 #''''''''''''''''''''''''''''''''''''''
 # Get collaborator countries
 #''''''''''''''''''''''''''''''''''''''
-INPUT_FILE  <- "author_institution_matches_all_years_2021_2024.parquet"
-OUTPUT_FILE <- "doi_author_countries.parquet"
+all_matches <- read_parquet("author_institution_matches_all_years_2021_2024.parquet")
 
-# ---- Load Input ----
-OA_origin_gender_data=read_parquet('./OA_origin_gender_data.parquet')
-
-all_matches <- read_parquet(INPUT_FILE)
-unique_dois  <- all_matches %>%
-  filter(!is.na(doi_clean)) %>%
-  distinct(doi_clean)
-
-message("[INFO] Unique DOIs to process: ", nrow(unique_dois))
-
-# ---- DB Connection ----
-source('connect_OA_DB.R')
-
-on.exit({
-  message("\n[CLEANUP] Closing DB connection...")
-  dbDisconnect(con)
-  message("[CLEANUP] Done.")
-}, add = TRUE)
-
-# ---- Upload DOIs to Temp Table ----
-message("[STEP 1] Uploading ", nrow(unique_dois), " DOIs to temp table...")
-
-dbWriteTable(
-  con, "temp_dois", unique_dois,
-  temporary = TRUE, overwrite = TRUE, row.names = FALSE
-)
-dbExecute(con, "CREATE INDEX idx_temp_dois ON temp_dois(doi_clean);")
-dbExecute(con, "ANALYZE temp_dois;")
-
-message("[STEP 1] Done.")
-
-
-# ---- Query: DOI -> work_id -> author_id -> institution -> country_code ----
+# ---- Query: work_id -> author_id -> institution -> country_code ----
 #
 # OpenAlex schema (openalex schema):
-#   works                        : id (work_id), doi
+#   works                        : id (work_id)
 #   works_authorships            : work_id, author_id, institution_id
 #   institutions                 : id (institution_id), display_name, country_code
 #
 # One authorship can have multiple institutions, so we keep all rows.
 # If an author has no institution row the country will be NA.
 
-# ---- Pre-materialise works with cleaned DOI (indexed) ----
-message("[STEP 2a] Materialising filtered works on server...")
 
+# Extract unique work IDs
+unique_work_ids <- all_matches %>% distinct(work_id)
 
+# Upload work IDs into a temporary PostgreSQL table
+dbWriteTable(
+  con, "temp_work_ids", unique_work_ids,
+  temporary = TRUE, overwrite = TRUE, row.names = FALSE
+)
+
+# Index the work_id column for faster lookup during joins
+dbExecute(con, "CREATE INDEX idx_temp_work_ids ON temp_work_ids(work_id);")
+dbExecute(con, "ANALYZE temp_work_ids;")
+
+# Loop through each year in the analysis window
+# Creates year-specific temporary tables to reduce dataset size per iteration
 for (yr in year_range) {
   
-  message(sprintf("[STEP 2a] Creating temp table for %d...", yr))
+  message(sprintf("[STEP] Creating temp table for %d...", yr))
   
-  # 1. Create temp table of works with DOIs for the year
+  # Ensure clean rerun by dropping existing temp table if it exists
   dbExecute(con, sprintf("
-    CREATE TEMP TABLE temp_works_doi_%d AS
+    DROP TABLE IF EXISTS temp_works_%d;
+  ", yr))
+  
+  # Create filtered work table for a specific year
+  # Only keeps works that are in temp_work_ids (i.e., relevant subset)
+  dbExecute(con, sprintf("
+    CREATE TEMP TABLE temp_works_%d AS
     SELECT w.id AS work_id,
            w.publication_year
     FROM openalex.works w
-    WHERE w.doi IS NOT NULL
-      AND w.publication_year = %d
-      AND LOWER(REPLACE(w.doi, 'https://doi.org/', '')) IN (
-          SELECT doi_clean FROM temp_dois
-      );
+    WHERE w.publication_year = %d
+      AND w.id IN (SELECT work_id FROM temp_work_ids);
   ", yr, yr))
   
-  # 2. Index for faster joins
-  dbExecute(con, sprintf("CREATE INDEX idON_temp_works_doi_%d ON temp_works_doi_%d(work_id);", yr, yr))
-  message(sprintf("[STEP 2a] Done for %d.", yr))
+  # Index work_id for faster joins in downstream steps
+  dbExecute(con, sprintf(
+    "CREATE INDEX idx_temp_works_%d ON temp_works_%d(work_id);",
+    yr, yr
+  ))
   
-  # 3. Reference temp table in dplyr
-  temp_workdoi <- tbl(con, sprintf("temp_works_doi_%d", yr))
+  # Reference temporary yearly work table in dbplyr
+  temp_work <- tbl(con, sprintf("temp_works_%d", yr))
   
-  # 4. Reference works_authorships and institutions tables
+  # Load authorship mapping (work → author → institution)
   works_authorships_tbl <- tbl(con, in_schema("openalex", "works_authorships")) %>%
-    filter(!is.na(institution_id)) %>%
     select(work_id, author_id, institution_id)
   
+  # Load institution metadata (for country-level analysis)
   institutions_tbl <- tbl(con, in_schema("openalex", "institutions")) %>%
     select(institution_id = id, country_code)
   
-  # 5. Join and compute temporary table
-  message(sprintf("[STEP 2b] Running main join for %d...", yr))
-  
-  work_author_inst_temp <- temp_workdoi %>%
+  # Join work-author-institution data for the given year
+  # Materialise result as a temporary table in the database
+  work_author_inst_temp <- temp_work %>%
     inner_join(works_authorships_tbl, by = "work_id") %>%
     left_join(institutions_tbl, by = "institution_id") %>%
     compute(
@@ -1743,18 +1726,18 @@ for (yr in year_range) {
       overwrite = TRUE
     )
   
-  message(sprintf("[STEP 2b] Done for %d.", yr))
+  message(sprintf("[DONE] %d complete", yr))
 }
 
 
 # Map works → grants from OA dataframe
-grant_work_tbl <- OA_origin_gender_data %>%
+grant_work_tbl <- all_matches %>%
   select(grant, work_id) %>%
   distinct() %>%
   copy_to(con, ., "grant_work_tbl", temporary = TRUE, overwrite = TRUE)
 
 # Copy OA work-author mapping to server
-oa_work_author_tbl <- OA_origin_gender_data %>%
+oa_work_author_tbl <- all_matches %>%
   select(work_id, author_id) %>%
   distinct() %>%
   copy_to(con, ., "oa_work_author_tbl", temporary = TRUE, overwrite = TRUE)
@@ -1801,7 +1784,7 @@ n_team_countries <- grant_team_inst_country %>%
   group_by(grant) %>%
   summarise(
     unique_countries_team = list(sort(unique(country_code))),
-    n_team_countries = n_distinct(country_code),
+    n_team_countries = n_distinct(country_code, na.rm = T),
     .groups = "drop"
   )
 
@@ -1810,9 +1793,9 @@ n_collaborators_countries <- all_inst_country %>%
   anti_join(grant_team_inst_country, by = c("grant", "institution_id")) %>%
   group_by(grant) %>%
   summarise(
-    n_collaborators = n_distinct(institution_id),
+    n_collaborators = n_distinct(institution_id, na.rm = T),
     unique_countries_collab = list(sort(unique(country_code))),
-    n_collaborators_countries = n_distinct(country_code),
+    n_collaborators_countries = n_distinct(country_code, na.rm = T),
     .groups = "drop"
   )
 
@@ -1839,10 +1822,7 @@ n_countries_df <- n_team_countries %>%
     unique_countries_collab = map_chr(unique_countries_collab, ~ paste(.x, collapse = ","))
   )
 
-write_csv(n_countries_df, './grant_country_summary.csv')
-
-# -> collaborator info
-grant_country_summary <- read_csv('grant_country_summary.csv')
+write_csv(n_countries_df, './grant_country_summary.csv', quote = 'none')
 
 
 # -----  Combine ----------
