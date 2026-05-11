@@ -6,7 +6,7 @@
 # ---- Load Libraries ----
 # List of packages
 packages <- c(
-  "dplyr", "purrr", "stringr", "dbplyr", "DBI", "furrr",
+  "dplyr", "purrr", "stringr", "dbplyr", "DBI", "furrr", "readxl",
   "stringdist", "arrow", "readr", "RPostgres", "tidyr", "DescTools", 
   "data.table", "lubridate", "vegan"
 )
@@ -1348,7 +1348,7 @@ people_counts <- total_authors %>%
 # -> proportion of people aged < 3,5,7,10
 academic_age_prop <- all_matches %>%
   left_join(
-    OA_origin_gender_data_1 %>%
+    OA_origin_gender_data %>%
       select(grant, author_id, academic_age_filtered_no_gap_2) %>%
       distinct(),
     by = c("author_id" = "author_id", "grant" = "grant")
@@ -1468,7 +1468,7 @@ grant_country_summary <- read_csv('./grant_country_summary.csv')
 # -> number of pubs
 n_pubs <- all_matches %>%
   group_by(grant) %>%
-  summarise(n_pubs = n_distinct(doi_clean), .groups = "drop")
+  summarise(n_pubs = n_distinct(work_id), .groups = "drop")
 
 
 ## ===== Grant =======
