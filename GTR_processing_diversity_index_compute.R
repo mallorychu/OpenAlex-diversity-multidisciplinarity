@@ -1651,6 +1651,7 @@ grant_multidisciplinary_index_summary_wide <- grant_multidisciplinary_index_scen
 # Get collaborator countries
 #''''''''''''''''''''''''''''''''''''''
 all_matches <- read_parquet("author_institution_matches_all_years_2021_2024.parquet")
+all_matches <- all_matches %>% filter(match_type != "string_distance")
 
 # ---- Query: work_id -> author_id -> institution -> country_code ----
 #
