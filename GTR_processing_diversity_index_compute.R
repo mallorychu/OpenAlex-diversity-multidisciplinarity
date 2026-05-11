@@ -1411,13 +1411,13 @@ cum_works_author <- dbGetQuery(
   "
     SELECT 
       t.grant,
-      t.oa_id,
+      t.author_id,
       SUM(ay.works_count) AS cum_works_pre_proj
     FROM temp_author_grant_start t
     JOIN openalex.authors_counts_by_year ay
-      ON t.oa_id = ay.author_id
+      ON t.author_id = ay.author_id
     WHERE ay.year < t.start_year
-    GROUP BY t.grant, t.oa_id;
+    GROUP BY t.grant, t.author_id;
   "
 )
 
