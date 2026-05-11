@@ -153,6 +153,23 @@ normalise_doi <- function(doi) {
     str_remove("^doi:")
 }
 
+
+#' Clean and Normalise title string for matching
+#'
+#' @param x Character vector of titles
+#' @return Character vector of normalised titles
+clean_title <- function(x) {
+  if (is.na(x)) return(x)
+  
+  x <- stringr::str_trim(x)
+  x <- stringr::str_replace_all(x, "\u00A0", " ")   # non-breaking space
+  x <- stringr::str_squish(x)                        # collapse multiple spaces
+  x <- stringr::str_replace_all(x, "\\s+([?.!,])", "\\1")  # space before punctuation
+  x <- stringr::str_to_lower(x)
+  
+  x
+}
+
 # ==============================================================================
 # MAIN PIPELINE
 # ==============================================================================
@@ -168,10 +185,11 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
   message("[3/10] Preparing publication data for year ", year, "...")
   
   temp_pub <- final_RC_publications_short |>
-    filter(Year == year, !is.na(DOI), DOI != "") |>
+    filter(Year == year) |>
     transmute(
       grant = ProjectReference,
       doi_clean = normalise_doi(DOI),
+      title_clean = map_chr(Title, clean_title),
       org_name = org_name,
       org_country_code = org_country_code,
       org_ror_id = org_ror_id,
@@ -211,6 +229,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
   
   # Create indexes on temp table (these are fast for small tables)
   dbExecute(con, "CREATE INDEX idx_temp_doi ON temp_publication(doi_clean)")
+  dbExecute(con, "CREATE INDEX idx_temp_title ON temp_publication(title_clean)")
   dbExecute(con, "CREATE INDEX idx_temp_ror ON temp_publication(org_ror_id) WHERE has_ror")
   dbExecute(con, "CREATE INDEX idx_temp_country ON temp_publication(org_country_code)")
   dbExecute(con, "ANALYZE temp_publication")
@@ -224,11 +243,18 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
   
   # Works table: filter by year and create cleaned DOI
   works_tbl <- tbl(con, in_schema("openalex", "works")) |>
-    filter(publication_year == year, !is.na(doi)) |>
+    filter(publication_year == year) |>
     mutate(
-      doi_clean = sql("LOWER(REPLACE(doi, 'https://doi.org/', ''))")
+      doi_clean = sql("
+      CASE 
+        WHEN doi IS NOT NULL AND doi <> '' 
+        THEN LOWER(REPLACE(doi, 'https://doi.org/', ''))
+        ELSE NULL
+      END
+    "),
+      title_lower = sql("lower(title)")
     ) |>
-    select(work_id = id, doi_clean, publication_year)
+    select(work_id = id, title_lower, doi_clean, publication_year)
   
   # Works authorships: only rows with institutions
   works_authorships_tbl <- tbl(con, in_schema("openalex", "works_authorships")) |>
@@ -253,18 +279,39 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
   # ---- 6. Join Publications to Works (Materialise) ----
   message("[6/10] Joining publications to works (materialising)...")
   
-  # This is the key optimisation: materialise the DOI join result
+  # key optimisation: materialise the DOI join result
   # so we don't repeat the expensive string operation
-  pub_works_query <- temp_pub_tbl |>
-    inner_join(works_tbl, by = "doi_clean")
+  # --------------------------- >>
+  # -> DOI matches 
+  doi_matches_query <- temp_pub_tbl |>
+    filter(!is.na(doi_clean) & doi_clean != "") |>
+    inner_join(works_tbl, by = "doi_clean") |> select(-title_lower)
   
   # Show query for debugging
   message("       Query plan:")
-  pub_works_query |> show_query() |> capture.output() |> head(10) |> walk(~message("         ", .x))
+  doi_matches_query |> show_query() |> capture.output() |> head(10) |> walk(~message("         ", .x))
+  
+  
+  # ---------------------------->>
+  # -> exact title match for precision for pubs missing DOIs
+  title_matches_query <- temp_pub_tbl |>
+    filter(is.na(doi_clean) | doi_clean == "") |>
+    select(-doi_clean) |>
+    inner_join(works_tbl, by = c("title_clean" = "title_lower"))
+               
+  # Show query for debugging
+  message("       Query plan:")
+  title_matches_query |> show_query() |> capture.output() |> head(10) |> walk(~message("         ", .x))# Materialise to temp table
+  
   
   # Materialise to temp table
-  pub_works_tbl <- pub_works_query |>
-    compute(name = "temp_pub_works", temporary = TRUE,  overwrite = TRUE)
+  pub_works_tbl <- doi_matches_query |>
+    union(title_matches_query) |>
+    compute(
+      name = "temp_pub_works",
+      temporary = TRUE,
+      overwrite = TRUE
+    )
   
   temp_tables_created <- c(temp_tables_created, "temp_pub_works")
   
@@ -274,13 +321,19 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
   dbExecute(con, "ANALYZE temp_pub_works")
   
   # Distinct DOIs in the materialised table
-  n_matched_dois <- pub_works_tbl %>%
-    summarise(n_distinct_doi = n_distinct(doi_clean)) %>%
-    collect() %>%
-    pull(n_distinct_doi)
+  summary_stats <- pub_works_tbl %>%
+    summarise(
+      doi_matches = n_distinct(doi_clean[!is.na(doi_clean) & doi_clean != ""]),
+      title_matches = n_distinct(title_clean[is.na(doi_clean) | doi_clean == ""])
+    ) %>%
+    collect()
   
-  message("       DOIs matched to works: ", n_matched_dois, 
-          " | Total DOIs in local data: ", n_local_dois)
+  message(
+    "       DOI matches: ", summary_stats$doi_matches,
+    " | Title matches: ", summary_stats$title_matches,
+    " | Total local DOIs: ", n_local_dois, 
+    " | Total publications: ", n_pubs
+  )
   
   # ---- 7. Exact ROR Matches ----
   message("[7/10] Finding exact ROR matches...")
@@ -300,6 +353,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
       author_id,
       author_name,
       doi_clean,
+      title_clean,
       inst_display_name,
       org_name,
       institution_id,
@@ -326,6 +380,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
       author_id,
       author_name,
       doi_clean,
+      title_clean,
       inst_display_name,
       org_name,
       org_block,
@@ -361,6 +416,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
         author_id,
         author_name,
         doi_clean,
+        title_clean,
         inst_display_name,
         org_name,
         institution_id
@@ -376,6 +432,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
       author_id = character(),
       author_name = character(),
       doi_clean = character(),
+      title_clean = character(),
       inst_display_name = character(),
       org_name = character(),
       institution_id = character()
@@ -441,6 +498,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
         author_id,
         author_name,
         doi_clean,
+        title_clean,
         inst_display_name,
         org_name,
         institution_id,
@@ -457,6 +515,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
       author_id = character(),
       author_name = character(),
       doi_clean = character(),
+      title_clean = character(),
       inst_display_name = character(),
       org_name = character(),
       institution_id = character(),
@@ -482,6 +541,7 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
       author_id,
       author_name,
       doi_clean,
+      title_clean,
       org_name,
       institution_id,
       inst_display_name,
@@ -497,8 +557,9 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
   message("  - Exact ROR matches:      ", sum(final_matches$match_type == "exact_ror"))
   message("  - Token block matches:    ", sum(final_matches$match_type == "token_block"))
   message("  - String distance matches:", sum(final_matches$match_type == "string_distance"))
-  message("DOIs matched to works: ", n_matched_dois, 
+  message("DOIs matched to works: ", summary_stats$doi_matches, 
           " | Total DOIs in local data: ", n_local_dois)
+  message("Titles matched to works: ", summary_stats$title_matches)
   
   # generate summary/information table
   summary_info <- tibble(
@@ -507,8 +568,9 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
     exact_ror_match = sum(final_matches$match_type == "exact_ror"),
     token_block_match = sum(final_matches$match_type == "token_block"),
     string_distance_match = sum(final_matches$match_type == "string_distance"),
-    dois_matched = n_matched_dois,
-    dois_total = n_local_dois
+    dois_matched = summary_stats$doi_matches,
+    dois_total = n_local_dois,
+    title_matched = summary_stats$title_matches
   )
   
   # Return both the matches and summary
@@ -528,7 +590,7 @@ run_yearly_matching_parquet <- function(start_year,
                                         end_year,
                                         summary_file = NULL,
                                         parquet_file = NULL,
-                                        yearly_folder = "yearly_parquet") {
+                                        yearly_folder = ".") {
   
   # ----------------------------
   # Auto-generate filenames if not provided
@@ -1212,6 +1274,9 @@ OA_origin_gender_data <- read_parquet('./OA_origin_gender_data.parquet')
 # Variables
 # ----------------------------------
 
+# Variables
+# ----------------------------------
+
 ## ===== Team =======
 
 # -> count of unnamed people, count of named people, total no of people, 
@@ -1283,7 +1348,7 @@ people_counts <- total_authors %>%
 # -> proportion of people aged < 3,5,7,10
 academic_age_prop <- all_matches %>%
   left_join(
-    OA_origin_gender_data %>%
+    OA_origin_gender_data_1 %>%
       select(grant, author_id, academic_age_filtered_no_gap_2) %>%
       distinct(),
     by = c("author_id" = "author_id", "grant" = "grant")
@@ -1323,15 +1388,48 @@ org_type_counts <- all_matches %>%
     names_prefix = "org_type_"
   )
 
+# ---------------------------------------------------------------
 # -> cumulative publication count (all prior years)
-cum_pub_count <- pubs %>%
-  filter(Year < 2021) %>%
-  group_by(ProjectReference) %>%
+author_grant_start <- all_matches %>%
+  filter(!is.na(author_id)) %>%
+  distinct(grant, author_id) %>%
+  left_join(
+    full_data %>%
+      transmute(
+        grant,
+        start_year = lubridate::year(start)
+      ),
+    by = "grant"
+  )
+
+dbWriteTable(con, "temp_author_grant_start", author_grant_start,
+  temporary = TRUE, overwrite = TRUE, row.names = FALSE)
+
+dbExecute(con, "CREATE INDEX idx_temp_author_ids ON temp_author_grant_start(author_id);")
+dbExecute(con, "ANALYZE temp_author_grant_start;")
+
+cum_works_author <- dbGetQuery(
+  con,
+  "
+    SELECT 
+      t.grant,
+      t.oa_id,
+      SUM(ay.works_count) AS cum_works_pre_proj
+    FROM temp_author_grant_start t
+    JOIN openalex.authors_counts_by_year ay
+      ON t.oa_id = ay.author_id
+    WHERE ay.year < t.start_year
+    GROUP BY t.grant, t.oa_id;
+  "
+)
+
+cum_pub_count <- cum_works_author %>%
+  group_by(grant) %>%
   summarise(
-    n_cum_pub = n_distinct(Title),
+    cum_pub_count = sum(cum_works_pre_proj, na.rm = TRUE),
     .groups = "drop"
-  ) %>%
-  mutate(n_cum_pub = replace_na(n_cum_pub, 0))
+  )
+# ---------------------------------------------------------------
 
 # -> Team UK geographic dispersion (number of distinct UK regions (NUTS2&1))
 uni_group_regions <- read_csv('./University_group_regions.csv')
@@ -1365,12 +1463,12 @@ team_uk_region <- all_matches %>%
 grant_country_summary <- read_csv('./grant_country_summary.csv')
 
 
-## ===== Publlcation =======
+## ===== Publication =======
 
 # -> number of pubs
-n_pubs <- pubs_sub %>%
-  group_by(ProjectReference) %>%
-  summarise(n_pubs = n_distinct(Title), .groups = "drop")
+n_pubs <- all_matches %>%
+  group_by(grant) %>%
+  summarise(n_pubs = n_distinct(doi_clean), .groups = "drop")
 
 
 ## ===== Grant =======
@@ -1476,7 +1574,7 @@ grant_specific_vars <- participants %>%
 # ===== Partner charactersitics =======
 # -> No of Russell Group university, No of non-Russell Group university,
 # -> No.of international named partner, count of partners
-partner_summary <- participants %>%
+partner_summary_partner_projects <- participants %>%
   filter(org_role == "Partner") %>%
   left_join(
     uni_group_regions %>%
@@ -1491,6 +1589,11 @@ partner_summary <- participants %>%
     n_total_partners = n_distinct(org_name),
     .groups = "drop"
   )
+
+partner_summary <- full_data %>%
+  distinct(grant) %>%
+  left_join(partner_summary_partner_projects, by = c("grant" = "reference")) %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0)))
 
 
 ## ===== Interdisciplinarity =======
@@ -1523,7 +1626,7 @@ grant_multidisciplinary_index_scenario_summary <- all_matches %>%
     prop_95 = mean(value > 0.95, na.rm = TRUE),
     prop_99 = mean(value > 0.99, na.rm = TRUE),
     
-    n_pubs = n_distinct((work_id[!is.na(value)])),
+    n_pubs = n_distinct(work_id[!is.na(value)]),
     
     shannon = diversity(value, index = "shannon"),
     simpson = diversity(value, index = "simpson"),
@@ -1740,15 +1843,14 @@ n_countries_df <- n_team_countries %>%
 
 write_csv(n_countries_df, './grant_country_summary.csv')
 
-# --------------------------
-# -----  Combine ----------
-# --------------------------
-# -----  Combine ----------
-# --------------------------
+# -> collaborator info
 grant_country_summary <- read_csv('grant_country_summary.csv')
 
+
+# -----  Combine ----------
+# --------------------------
 full_data <- diversity %>% 
-  left_join(people_counts, by = "grant") %>%
+  left_join(people_counts %>% select(grant, n_total_authors, n_named_authors, prop_named_authors), by = "grant") %>%
   left_join(academic_age_prop, by = "grant") %>%
   left_join(n_unique_institutions, by = "grant") %>%
   left_join(org_type_counts, by = "grant") %>%
@@ -1757,15 +1859,12 @@ full_data <- diversity %>%
   left_join(grant_country_summary %>% select(-starts_with('unique_countries')), by = "grant") %>%
   left_join(n_pubs, by = c("grant"="ProjectReference")) %>%
   left_join(grant_specific_vars, by = c("grant"="reference")) %>%
-  left_join(partner_summary, by = c("grant"="reference")) %>%
+  left_join(partner_summary, by = "grant") %>%
   left_join(grant_multidisciplinary_index_summary_wide, by = "grant")
 
 full_data <- full_data %>% filter(between(start_cy, 2021, 2024)) # include projects between 2021 and 2024
 
 write.csv(full_data, "diversity_outcomes_and_characteristics.csv", row.names = FALSE)
-
-# -> collaborator info
-grant_country_summary <- read_csv('grant_country_summary.csv')
 
 
 #''''''''''''''''''''''''''''''''''''''
