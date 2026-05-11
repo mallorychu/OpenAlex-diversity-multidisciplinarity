@@ -43,7 +43,7 @@ all_publication = all_publication[
     (all_publication.publication_year >= start_year) &
     (all_publication.publication_year <= end_year)
 ]
-print("Publications loaded:", len(all_publication))
+print("Records loaded:", len(all_publication))
 
 # ==============================
 # 4. CREATE TEMP TABLE FOR WORK IDS
