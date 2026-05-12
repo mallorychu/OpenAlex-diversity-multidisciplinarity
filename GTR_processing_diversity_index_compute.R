@@ -287,6 +287,12 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
     filter(!is.na(doi_clean) & doi_clean != "") |>
     inner_join(works_tbl, by = "doi_clean") |> select(-title_lower)
   
+  # DOI summary
+  doi_match_count <- doi_matches_query %>%
+    summarise(
+      doi_matches = n_distinct(doi_clean)
+    )
+  
   # Show query for debugging
   message("       Query plan:")
   doi_matches_query |> show_query() |> capture.output() |> head(10) |> walk(~message("         ", .x))
@@ -298,6 +304,12 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
     filter(is.na(doi_clean) | doi_clean == "") |>
     select(-doi_clean) |>
     inner_join(works_tbl, by = c("title_clean" = "title_lower"))
+  
+  # Title summary
+  title_match_count <- title_matches_query %>%
+    summarise(
+      title_matches = n_distinct(title_clean)
+    )
                
   # Show query for debugging
   message("       Query plan:")
@@ -320,12 +332,9 @@ run_matching_pipeline <- function(year = YEAR, batch_size = BATCH_SIZE) {
   dbExecute(con, "CREATE INDEX idx_tpw_ror ON temp_pub_works(org_ror_id) WHERE has_ror")
   dbExecute(con, "ANALYZE temp_pub_works")
   
-  # Distinct DOIs in the materialised table
-  summary_stats <- pub_works_tbl %>%
-    summarise(
-      doi_matches = n_distinct(doi_clean[!is.na(doi_clean) & doi_clean != ""]),
-      title_matches = n_distinct(title_clean[is.na(doi_clean) | doi_clean == ""])
-    ) %>%
+  # Combine summaries distinct DOIs and titles
+  summary_stats <- doi_match_count %>%
+    cross_join(title_match_count) %>%
     collect()
   
   message(
@@ -590,7 +599,7 @@ run_yearly_matching_parquet <- function(start_year,
                                         end_year,
                                         summary_file = NULL,
                                         parquet_file = NULL,
-                                        yearly_folder = ".") {
+                                        yearly_folder = "yearly_parquet") {
   
   # ----------------------------
   # Auto-generate filenames if not provided
@@ -619,7 +628,7 @@ run_yearly_matching_parquet <- function(start_year,
     summary_list[[as.character(year)]] <- res$summary
     
     # save individual year matches as Parquet
-    arrow::write_parquet(res$matches, paste0("author_institution_matches_", year, ".parquet"))
+    arrow::write_parquet(res$matches, paste0(yearly_folder, "/author_institution_matches_", year, ".parquet"))
   }
   
   # combine summaries
@@ -646,7 +655,6 @@ run_yearly_matching_parquet <- function(start_year,
     matches = all_matches
   ))
 }
-
 
 res <- run_yearly_matching_parquet(start_year = min(year_range), end_year = max(year_range))
 
@@ -1392,12 +1400,12 @@ author_grant_start <- all_matches %>%
   filter(!is.na(author_id)) %>%
   distinct(grant, author_id) %>%
   left_join(
-    full_data %>%
+    participants %>%
       transmute(
-        grant,
+        reference,
         start_year = lubridate::year(start)
-      ),
-    by = "grant"
+      ) %>% distinct(),
+    by = c("grant"='reference')
   )
 
 dbWriteTable(con, "temp_author_grant_start", author_grant_start,
@@ -1406,20 +1414,27 @@ dbWriteTable(con, "temp_author_grant_start", author_grant_start,
 dbExecute(con, "CREATE INDEX idx_temp_author_ids ON temp_author_grant_start(author_id);")
 dbExecute(con, "ANALYZE temp_author_grant_start;")
 
-cum_works_author <- dbGetQuery(
-  con,
-  "
-    SELECT 
-      t.grant,
-      t.author_id,
-      SUM(ay.works_count) AS cum_works_pre_proj
-    FROM temp_author_grant_start t
-    JOIN openalex.authors_counts_by_year ay
-      ON t.author_id = ay.author_id
-    WHERE ay.year < t.start_year
-    GROUP BY t.grant, t.author_id;
-  "
-)
+dbExecute(con, "
+  CREATE TEMP TABLE temp_filtered_ay AS
+  SELECT ay.author_id, ay.year, ay.works_count
+  FROM openalex.authors_counts_by_year ay
+  WHERE ay.author_id IN (SELECT DISTINCT author_id FROM temp_author_grant_start);
+")
+
+dbExecute(con, "CREATE INDEX idx_filtered_ay ON temp_filtered_ay(author_id, year);")
+dbExecute(con, "ANALYZE temp_filtered_ay;")
+
+cum_works_author <- dbGetQuery(con, "
+  SELECT 
+    t.grant,
+    t.author_id,
+    SUM(ay.works_count) AS cum_works_pre_proj
+  FROM temp_author_grant_start t
+  JOIN temp_filtered_ay ay
+    ON t.author_id = ay.author_id
+    AND ay.year < t.start_year
+  GROUP BY t.grant, t.author_id;
+")
 
 cum_pub_count <- cum_works_author %>%
   group_by(grant) %>%
@@ -1427,6 +1442,10 @@ cum_pub_count <- cum_works_author %>%
     cum_pub_count = sum(cum_works_pre_proj, na.rm = TRUE),
     .groups = "drop"
   )
+
+cum_pub_count_f <- all_matches %>%
+  left_join(cum_pub_count, by = "grant") %>%
+  mutate(cum_pub_count = tidyr::replace_na(cum_pub_count, 0))
 # ---------------------------------------------------------------
 
 # -> Team UK geographic dispersion (number of distinct UK regions (NUTS2&1))
@@ -1458,7 +1477,7 @@ team_uk_region <- all_matches %>%
 # -> based on affiliation: total number of countries
 # total number of collaborator countries (based on affiliation)
 # number of countries outside of origin
-grant_country_summary <- read_csv('./grant_country_summary.csv')
+grant_country_summary <- readRDS("grant_country_summary.rds")
 
 
 ## ===== Publication =======
@@ -1650,8 +1669,9 @@ grant_multidisciplinary_index_summary_wide <- grant_multidisciplinary_index_scen
 #''''''''''''''''''''''''''''''''''''''
 # Get collaborator countries
 #''''''''''''''''''''''''''''''''''''''
-all_matches <- read_parquet("author_institution_matches_all_years_2021_2024.parquet")
-all_matches <- all_matches %>% filter(match_type != "string_distance")
+# ---- Load Input ----
+all_matches <- read_parquet(INPUT_FILE)
+all_matches <- all_matches %>% filter(match_type != "string_distance") # manually checked - not reliable
 
 # ---- Query: work_id -> author_id -> institution -> country_code ----
 #
@@ -1729,6 +1749,7 @@ for (yr in year_range) {
   
   message(sprintf("[DONE] %d complete", yr))
 }
+
 
 
 # Map works → grants from OA dataframe
@@ -1823,7 +1844,8 @@ n_countries_df <- n_team_countries %>%
     unique_countries_collab = map_chr(unique_countries_collab, ~ paste(.x, collapse = ","))
   )
 
-write_csv(n_countries_df, './grant_country_summary.csv', quote = 'none')
+saveRDS(n_countries_df, "./grant_country_summary.rds")
+
 
 
 # -----  Combine ----------
@@ -1833,10 +1855,10 @@ full_data <- diversity %>%
   left_join(academic_age_prop, by = "grant") %>%
   left_join(n_unique_institutions, by = "grant") %>%
   left_join(org_type_counts, by = "grant") %>%
-  left_join(cum_pub_count, by = c("grant"="ProjectReference")) %>%
+  left_join(cum_pub_count_f, by = "grant") %>%
   left_join(team_uk_region, by = "grant") %>%
   left_join(grant_country_summary %>% select(-starts_with('unique_countries')), by = "grant") %>%
-  left_join(n_pubs, by = c("grant"="ProjectReference")) %>%
+  left_join(n_pubs, by = "grant") %>%
   left_join(grant_specific_vars, by = c("grant"="reference")) %>%
   left_join(partner_summary, by = "grant") %>%
   left_join(grant_multidisciplinary_index_summary_wide, by = "grant")
