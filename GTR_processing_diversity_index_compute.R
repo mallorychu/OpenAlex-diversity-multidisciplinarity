@@ -1855,7 +1855,7 @@ full_data <- diversity %>%
   left_join(academic_age_prop, by = "grant") %>%
   left_join(n_unique_institutions, by = "grant") %>%
   left_join(org_type_counts, by = "grant") %>%
-  left_join(cum_pub_count_f, by = "grant") %>%
+  left_join(cum_pub_count_f %>% select(grant, cum_pub_count), by = "grant") %>%
   left_join(team_uk_region, by = "grant") %>%
   left_join(grant_country_summary %>% select(-starts_with('unique_countries')), by = "grant") %>%
   left_join(n_pubs, by = "grant") %>%
