@@ -1633,7 +1633,11 @@ grant_multidisciplinary_index_scenario_summary <- all_matches %>%
   summarise(
     mean   = mean(value, na.rm = TRUE),
     median = median(value, na.rm = TRUE),
-    sd     = sd(value, na.rm = TRUE),
+    sd     = dplyr::if_else(
+      sum(!is.na(value)) <= 1,
+      0,
+      sd(value, na.rm = TRUE)
+    ),
     min    = min(value, na.rm = TRUE),
     max    = max(value, na.rm = TRUE),
     
@@ -1645,9 +1649,13 @@ grant_multidisciplinary_index_scenario_summary <- all_matches %>%
     
     n_pubs = n_distinct(work_id[!is.na(value)]),
     
-    shannon = diversity(value, index = "shannon"),
-    simpson = diversity(value, index = "simpson"),
-    gini    = Gini(value),
+    shannon = diversity(na.omit(value), index = "shannon"),
+    simpson = diversity(na.omit(value), index = "simpson"),
+    gini    = dplyr::if_else(
+      sum(!is.na(value)) <= 1,
+      0,
+      Gini(value, na.rm = TRUE)
+    ),
     
     .groups = "drop"
   )
