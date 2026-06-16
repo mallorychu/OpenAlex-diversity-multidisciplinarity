@@ -2114,3 +2114,53 @@ pi_summary <- first_pi_grant %>%
 pi_summary <- pi_summary %>% filter(grant %in% full_data$grant)
 
 write.csv(pi_summary, "PI_characteristics.csv", row.names = FALSE)
+
+# ------------------------------------------------------------------
+# retrieve PI and coI publications five years before the project starts 
+# ------------------------------------------------------------------
+pi_coi_sub_grant_start <- grant_pi_cois %>% select(oa_id, reference, role) %>% 
+  left_join(
+    participants %>% select(reference, start_cy) %>% distinct(),
+    by = "reference"
+  ) %>%
+  rename(grant = reference)
+
+dbWriteTable(
+  con,
+  "pi_coi_sub_grant_start",
+  pi_coi_sub_grant_start,
+  temporary = TRUE,
+  overwrite = TRUE
+)
+
+dbExecute(con, "CREATE INDEX idx_sub_pi_coi_ids ON pi_coi_sub_grant_start(oa_id);")
+dbExecute(con, "CREATE INDEX idx_sub_pi_coi_startcy ON pi_coi_sub_grant_start(start_cy);")
+
+sql <- "
+WITH works_filtered AS (
+    SELECT
+        id AS work_id,
+        publication_year
+    FROM openalex.works
+    WHERE publication_year BETWEEN 2016 AND 2023
+)
+
+SELECT
+    p.oa_id,
+    p.grant,
+    p.start_cy,
+    wf.work_id,
+    wf.publication_year
+FROM pg_temp.pi_coi_sub_grant_start p
+JOIN openalex.works_authorships wa
+    ON wa.author_id = p.oa_id
+JOIN works_filtered wf
+    ON wf.work_id = wa.work_id
+WHERE wf.publication_year BETWEEN p.start_cy - 5
+                              AND p.start_cy - 1
+"
+
+res <- dbGetQuery(con, sql)
+
+write.csv(res, "pi_coi_5yPreGrant_publications.csv", row.names = FALSE)
+
