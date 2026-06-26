@@ -1855,6 +1855,78 @@ n_countries_df <- n_team_countries %>%
 saveRDS(n_countries_df, "./grant_country_summary.rds")
 
 
+## =================================================
+## Get all 2020 publications in 2020 where the first institution in the UK
+
+# ------------------------------------------------------------
+# STEP 1: filter works to 2020
+# ------------------------------------------------------------
+dbExecute(con, "
+  DROP TABLE IF EXISTS temp_works_2020_gb;
+")
+
+dbExecute(con, "
+  CREATE TEMP TABLE temp_works_2020 AS
+  SELECT id AS work_id,
+         publication_year
+  FROM openalex.works
+  WHERE publication_year = 2020;
+")
+
+dbExecute(con, "
+  CREATE INDEX idx_temp_works_2020_work_id
+  ON temp_works_2020(work_id);
+")
+
+# ------------------------------------------------------------
+# STEP 2: first author institution only
+# ------------------------------------------------------------
+dbExecute(con, "
+  CREATE TEMP TABLE temp_first_inst_2020 AS
+  SELECT w.work_id,
+         wa.institution_id
+  FROM temp_works_2020 w
+  JOIN openalex.works_authorships wa
+    ON wa.work_id = w.work_id
+  WHERE wa.author_position = 'first';
+")
+
+dbExecute(con, "
+  CREATE INDEX idx_temp_first_inst_2020_work_id
+  ON temp_first_inst_2020(work_id);
+")
+
+dbExecute(con, "
+  CREATE INDEX idx_temp_first_inst_2020_inst_id
+  ON temp_first_inst_2020(institution_id);
+")
+
+# ------------------------------------------------------------
+# STEP 3: GB filter
+# ------------------------------------------------------------
+dbExecute(con, "
+  CREATE TEMP TABLE temp_works_2020_gb AS
+  SELECT t.work_id,
+         t.publication_year,
+         ig.country_code
+  FROM temp_works_2020 t
+  JOIN temp_first_inst_2020 fi
+    ON t.work_id = fi.work_id
+  JOIN openalex.institutions_geo ig
+    ON ig.institution_id = fi.institution_id
+  WHERE ig.country_code = 'GB';
+")
+
+# ------------------------------------------------------------
+# STEP 4: bring result into R
+# ------------------------------------------------------------
+df_2020_gb <- dbGetQuery(con, "
+  SELECT *
+  FROM temp_works_2020_gb;
+")
+
+write_parquet(df_2020_gb, "temp_works_2020_gb.parquet")
+
 
 # -----  Combine ----------
 # --------------------------
@@ -2163,4 +2235,53 @@ WHERE wf.publication_year BETWEEN p.start_cy - 5
 res <- dbGetQuery(con, sql)
 
 write.csv(res, "pi_coi_5yPreGrant_publications.csv", row.names = FALSE)
+
+# ====================================================================
+# retrieve PI and coI publications five years before the project starts 
+pi_coi_sub_grant_start <- grant_pi_cois %>% select(oa_id, reference, role) %>% 
+  left_join(
+    participants %>% select(reference, start_cy) %>% distinct(),
+    by = "reference"
+  ) %>%
+  rename(grant = reference)
+
+dbWriteTable(
+  con,
+  "pi_coi_sub_grant_start",
+  pi_coi_sub_grant_start,
+  temporary = TRUE,
+  overwrite = TRUE
+)
+
+dbExecute(con, "CREATE INDEX idx_sub_pi_coi_ids ON pi_coi_sub_grant_start(oa_id);")
+dbExecute(con, "CREATE INDEX idx_sub_pi_coi_startcy ON pi_coi_sub_grant_start(start_cy);")
+
+sql <- "
+WITH works_filtered AS (
+    SELECT
+        id AS work_id,
+        publication_year
+    FROM openalex.works
+    WHERE publication_year BETWEEN 2016 AND 2023
+)
+
+SELECT
+    p.oa_id,
+    p.grant,
+    p.start_cy,
+    wf.work_id,
+    wf.publication_year
+FROM pg_temp.pi_coi_sub_grant_start p
+JOIN openalex.works_authorships wa
+    ON wa.author_id = p.oa_id
+JOIN works_filtered wf
+    ON wf.work_id = wa.work_id
+WHERE wf.publication_year BETWEEN p.start_cy - 5
+                              AND p.start_cy - 1
+"
+
+res <- dbGetQuery(con, sql)
+
+write.csv(res, "pi_coi_5yPreGrant_publications.csv", row.names = FALSE)
+
 
